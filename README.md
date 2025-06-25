@@ -1,2 +1,2 @@
 # Demo-XTTS
-This repo used to store demo XTTS
+This Repository is created in order to conduct XTTS finetuning and experimenting with TTS model
