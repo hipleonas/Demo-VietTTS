@@ -183,12 +183,28 @@ def istft(
     return librosa.istft(y, hop_length=hop_length, win_length=win_length, center=center, window=window)
 
 def griffin_lim(*, spec: np.ndarray = None, num_iter=60, **kwargs) -> np.ndarray:
-    return
+    angles = np.exp(2j * np.pi * np.random.rand(*spec.shape))
+    S_complex = np.abs(spec).astype(complex)
+    y = istft(y=S_complex * angles, **kwargs)
+    if not np.isfinite(y).all():
+        print(" [!] Waveform is not finite everywhere. Skipping the GL.")
+        return np.array([0.0])
+    for _ in range(num_iter):
+        angles = np.exp(1j * np.angle(stft(y=y, **kwargs)))
+        y = istft(y=S_complex * angles, **kwargs)
+    return y
+
 
 def compute_stft_paddings(
     *, x: np.ndarray = None, hop_length: int = None, pad_two_sides: bool = False, **kwargs
 ) -> Tuple[int, int]:
-    return
+    """Compute paddings used by Librosa's STFT. Compute right padding (final frame) or both sides padding
+    (first and final frames)"""
+    pad = (x.shape[0] // hop_length + 1) * hop_length - x.shape[0]
+    if not pad_two_sides:
+        return 0, pad
+    return pad // 2, pad // 2 + pad % 2
+
 
 def compute_f0(
     *,
@@ -201,12 +217,76 @@ def compute_f0(
     stft_pad_mode: str = "reflect",
     center: bool = True,
     **kwargs,
-) -> np.ndarray:    
-    
-    return
+) -> np.ndarray:
+    """Compute pitch (f0) of a waveform using the same parameters used for computing melspectrogram.
+
+    Args:
+        x (np.ndarray): Waveform. Shape :math:`[T_wav,]`
+        pitch_fmax (float): Pitch max value.
+        pitch_fmin (float): Pitch min value.
+        hop_length (int): Number of frames between STFT columns.
+        win_length (int): STFT window length.
+        sample_rate (int): Audio sampling rate.
+        stft_pad_mode (str): Padding mode for STFT.
+        center (bool): Centered padding.
+
+    Returns:
+        np.ndarray: Pitch. Shape :math:`[T_pitch,]`. :math:`T_pitch == T_wav / hop_length`
+
+    Examples:
+        >>> WAV_FILE = filename = librosa.example('vibeace')
+        >>> from TTS.config import BaseAudioConfig
+        >>> from TTS.utils.audio import AudioProcessor
+        >>> conf = BaseAudioConfig(pitch_fmax=640, pitch_fmin=1)
+        >>> ap = AudioProcessor(**conf)
+        >>> wav = ap.load_wav(WAV_FILE, sr=ap.sample_rate)[:5 * ap.sample_rate]
+        >>> pitch = ap.compute_f0(wav)
+    """
+    assert pitch_fmax is not None, " [!] Set `pitch_fmax` before caling `compute_f0`."
+    assert pitch_fmin is not None, " [!] Set `pitch_fmin` before caling `compute_f0`."
+
+    f0, voiced_mask, _ = pyin(
+        y=x.astype(np.double),
+        fmin=pitch_fmin,
+        fmax=pitch_fmax,
+        sr=sample_rate,
+        frame_length=win_length,
+        win_length=win_length // 2,
+        hop_length=hop_length,
+        pad_mode=stft_pad_mode,
+        center=center,
+        n_thresholds=100,
+        beta_parameters=(2, 18),
+        boltzmann_parameter=2,
+        resolution=0.1,
+        max_transition_rate=35.92,
+        switch_prob=0.01,
+        no_trough_prob=0.01,
+    )
+    f0[~voiced_mask] = 0.0
+
+    return f0
+
 
 def compute_energy(y: np.ndarray, **kwargs) -> np.ndarray:
-    return
+    """Compute energy of a waveform using the same parameters used for computing melspectrogram.
+    Args:
+      x (np.ndarray): Waveform. Shape :math:`[T_wav,]`
+    Returns:
+      np.ndarray: energy. Shape :math:`[T_energy,]`. :math:`T_energy == T_wav / hop_length`
+    Examples:
+      >>> WAV_FILE = filename = librosa.example('vibeace')
+      >>> from TTS.config import BaseAudioConfig
+      >>> from TTS.utils.audio import AudioProcessor
+      >>> conf = BaseAudioConfig()
+      >>> ap = AudioProcessor(**conf)
+      >>> wav = ap.load_wav(WAV_FILE, sr=ap.sample_rate)[:5 * ap.sample_rate]
+      >>> energy = ap.compute_energy(wav)
+    """
+    x = stft(y=y, **kwargs)
+    mag, _ = magphase(x)
+    energy = np.sqrt(np.sum(mag**2, axis=0))
+    return energy
 
 ###Xử lí âm thanh###
 def load_wav(*, filename: str, sample_rate: int = None, resample: bool = False, **kwargs) -> np.ndarray:
@@ -243,7 +323,13 @@ def find_endpoint(
     base: int = None,
     **kwargs,
 ) -> int:
-    return
+    window_length = int(sample_rate * min_silence_sec)
+    hop_length = int(window_length / 4)
+    threshold = db_to_amp(x=-trim_db, gain=gain, base=base)
+    for x in range(hop_length, len(wav) - window_length, hop_length):
+        if np.max(wav[x : x + window_length]) < threshold:
+            return x + hop_length
+    return len(wav)
 
 def trim_silence(
     *,
@@ -254,19 +340,32 @@ def trim_silence(
     hop_length: int = None,
     **kwargs,
 ) -> np.ndarray:
+    """
+    Cắt bỏ đoạn đầu và cuối của tín hiệu âm thanh
+    """
+    threshold_margin = 0.01
+    margin = int(sample_rate * threshold_margin)  # 100ms
+    wav = wav[margin:-margin]
+    return librosa.effects.trim(wav, top_db=trim_db, frame_length=win_length, hop_length=hop_length)[0]
+
     
-    return
 
 def volume_norm(*, x: np.ndarray = None, coef: float = 0.95, **kwargs) -> np.ndarray:
-    return
+
+    x_norm = x / abs(x).max() * coef
+    return x_norm
 
 
 def rms_norm(*, wav: np.ndarray = None, db_level: float = -27.0, **kwargs) -> np.ndarray:
-    return
+    target_r = 10 ** (db_level / 20)  # Chuyển đổi dB sang tỷ lệ
+    a = np.sqrt((len(wav) * (target_r**2)) / np.sum(wav**2))
+    return wav * a
 
 
 def rms_volume_norm(*, x: np.ndarray, db_level: float = -27.0, **kwargs) -> np.ndarray:
-    return
+    assert -99 <= db_level <= 0, " [!] db_level should be between -99 and 0"
+    wav = rms_norm(wav=x, db_level=db_level)
+    return wav
 
 def mulaw_encode(*, wav: np.ndarray, mulaw_qc: int, **kwargs) -> np.ndarray:
     """
