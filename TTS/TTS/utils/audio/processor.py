@@ -7,7 +7,7 @@ import scipy.signal as signal
 from coqpit import Coqpit
 
 from TTS.tts.utils.helpers import StandardScaler
-from TTs.utils.audio.numpy_transforms import (
+from TTS.utils.audio.numpy_transforms import (
     amp_to_db,
     build_mel_basis,
     compute_f0,
