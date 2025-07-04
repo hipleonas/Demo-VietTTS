@@ -3,7 +3,7 @@ import base64
 import tiktoken
 from functools import lru_cache
 from whisper.tokenizer import Tokenizer
-
+#Adding tokenizer
 LANGUAGES = {
     "en": "english",
     "zh": "chinese",
