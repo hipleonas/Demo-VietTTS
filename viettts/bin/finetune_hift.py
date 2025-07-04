@@ -5,13 +5,18 @@ import torch.nn.functional as F
 import torchaudio
 import torch.optim as optim
 import yaml
+import random
+import numpy as np
+from omegaconf import OmegaConf
 """
 https://github.com/kan-bayashi/ParallelWaveGAN
 """
 from torch.utils.data import DataLoader, Dataset
 # from parallel_wavegan import MultiBandMelGANGenerator
-from hifigan.generator import HiFTGenerator
-from hifigan.f0_predictor import ConvRNNF0Predictor
+from viettts.hifigan.generator import HiFTGenerator
+from viettts.hifigan.f0_predictor import ConvRNNF0Predictor
+"""==============This part is for parallel wavegan================"""
+
 def stft(x, fft_size, hop_size, win_length, window):
     """Perform STFT and convert to magnitude spectrogram.
 
@@ -84,6 +89,7 @@ class LogSTFTMagnitudeLoss(torch.nn.Module):
 
         """
         return F.l1_loss(torch.log(y_mag), torch.log(x_mag))
+    
 class STFTLoss(torch.nn.Module):
     """STFT loss module."""
 
@@ -169,6 +175,7 @@ class MultiResolutionSTFTLoss(nn.Module):
         mag_loss /= len(self.stft_losses)
 
         return sc_loss, mag_loss
+"""======================================="""
 """Xử lí dataset"""
 class TTSDataset(Dataset):
     def __init__(self, filelist):
@@ -187,51 +194,96 @@ class TTSDataset(Dataset):
     
 # ----------- Main Training -------------
 def main():
-    with open("config.yaml", "r") as f:
-        config = yaml.safe_load(f)
+    config_path = "/home/hiepquoc/Demo-VietTTS/pretrained-models/hift_config.yaml"
+    # with open("config.yaml", "r") as f:
+    #     config = yaml.safe_load(f)
+    
+    config = OmegaConf.load(config_path)
+    print('Config loaded from')
+
+    print(config['hift'])
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print('Using device:', device)
     # ---- Instantiate model ----
-    f0_predictor = ConvRNNF0Predictor().to(device)
-    generator = HiFTGenerator(
-        f0_predictor = f0_predictor,
-        **config["hift"]
+    f0_predictor = ConvRNNF0Predictor(
+        num_class=config["hift"]["f0_predictor"]["num_class"],
+        in_channels=config["hift"]["f0_predictor"]["in_channels"],
+        cond_channels=config["hift"]["f0_predictor"]["cond_channels"]
     ).to(device)
 
+    hift_config = config["hift"].copy()
+    del hift_config["f0_predictor"]
+    generator = HiFTGenerator(
+        f0_predictor=f0_predictor,  # Truyền riêng
+        **hift_config               # Truyền phần còn lại
+    ).to(device)
+
+
     # ---- Optional: Load pretrained ----
-    pretrained_path = "/home/hiepquoc/Demo-VietTTS/pretrained/hift.pth"
-
+    pretrained_path = config["pretrain_path"]
     if os.path.exists(pretrained_path):
-
-        print(f'Loading the pretrained model from: {pretrained_path}')
+        print(f"Loading pretrained model from: {pretrained_path}")
         state_dict = torch.load(pretrained_path, map_location=device)
-        generator.load_state_dict(state_dict, strict = False)
+        generator.load_state_dict(state_dict, strict=False)
+    
 
     # ---- Dataset ----
-    trainset = TTSDataset("train_filelist.txt")
-    trainloader = DataLoader(trainset, batch_size=4, shuffle=True, num_workers=4)
-    # ---- Loss & Optimizer ----
-    stft_loss = MultiResolutionSTFTLoss()
-    optimizer = optim.AdamW(generator.parameters(), lr = 1e-4)
-    #---- Training Loop ----
+    # print('FOO')
+    # print(config["data"]["path"])
+    #Convert to list
+    data_path = config["data"]["path"]
 
-    generator.train()
-    step = 0
-    max_epochs = config["training"]["max_epochs"]
-    for epoch in range(max_epochs):
-        for mel, wav in trainloader:
-            mel = mel.to(device)           # (B, 80, T)
-            wav = wav.to(device)   
+    output_list = os.path.join(data_path, "train_filelist.txt")
+    wav_files = sorted([f for f in os.listdir(data_path +"/data") if f.lower().endswith(".wav")])
+    with open(output_list, "w", encoding="utf-8") as f:
+        for wav in wav_files:
+            full_path = os.path.join(data_path+"/data", wav)
+            f.write(f"{full_path}|{full_path}\n")
 
-            y_hat, _ = generator(mel)
-            min_len = min(y_hat.shape[1], wav.shape[1])
-            y_hat = y_hat[:, :min_len]      # (B, T)
-            wav = wav[:, :min_len]          # (B, T)
-            loss, _ = stft_loss(y_hat, wav)
+    print(f"Đã tạo file list: {output_list} ({len(wav_files)} samples)")
 
-            if step % 10 == 0:
-                print(f"Step {step}: Loss = {loss.item():.4f}")
-            step += 1
+    # dataset = TTSDataset(config["data"]["path"])
+    # print(dataset)
 
+    # trainloader = DataLoader(dataset, batch_size = config["batch_size"],shuffle=True, num_workers=4)
+
+    # # ---- Loss & Optimizer ----
+    # stft_loss = MultiResolutionSTFTLoss()
+    # optimizer = optim.AdamW(generator.parameters(), lr = 1e-4)
+    # #---- Training Loop ----
+    # max_epochs = config["epochs"]
+    # output_dir = config["output_dir"]
+    # os.makedirs(output_dir, exist_ok=True)
+    # generator.train()
+    # step = 0
+
+    # for epoch in range(max_epochs):
+    #     for mel, wav in trainloader:
+    #         mel = mel.to(device)
+    #         wav = wav.to(device)
+
+    #         y_hat, _ = generator(mel)
+    #         min_len = min(y_hat.shape[1], wav.shape[1])
+    #         y_hat = y_hat[:, :min_len]
+    #         wav = wav[:, :min_len]
+
+    #         loss, _ = stft_loss(y_hat, wav)
+    #         optimizer.zero_grad()
+    #         loss.backward()
+    #         optimizer.step()
+
+    #         if step % 10 == 0:
+    #             print(f"Epoch {epoch}, Step {step}: Loss = {loss.item():.4f}")
+
+    #         if step % 1000 == 0:
+    #             save_path = os.path.join(output_dir, f"checkpoint_step{step}.pt")
+    #             torch.save(generator.state_dict(), save_path)
+    #             print(f"Saved checkpoint at: {save_path}")
+
+    #         step += 1
+    
 
 if __name__ == "__main__":
+
+   
     main()
